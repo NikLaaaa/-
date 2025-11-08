@@ -11,47 +11,42 @@ app.use(express.json());
 const apiId = Number(process.env.TELEGRAM_API_ID);
 const apiHash = process.env.TELEGRAM_API_HASH;
 
+// Храним последнюю выданную строку сессии в памяти (и дублируем в лог)
+let lastSession = null;
+
 const page = (body) => `<!doctype html>
 <html lang="ru"><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Telegram StringSession</title>
 <style>
-body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:20px;max-width:760px}
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:20px;max-width:860px}
 label{display:block;margin:10px 0 4px}
-input,button{font:inherit;padding:10px;border-radius:8px;border:1px solid #cbd5e1}
+input,button,textarea{font:inherit;padding:10px;border-radius:8px;border:1px solid #cbd5e1}
 button{background:#4f8cff;border:none;color:#fff;cursor:pointer}
 .box{padding:12px;border:1px solid #e2e8f0;border-radius:10px;background:#f8fafc;margin-bottom:14px}
-pre{white-space:pre-wrap;word-break:break-all;background:#0f172a;color:#e5e7eb;padding:12px;border-radius:8px}
+pre{white-space:pre-wrap;word-break:break-all;background:#f1f5f9;color:#111;padding:12px;border-radius:8px}
 .err{color:#dc2626;font-weight:700}
 .row{display:flex;gap:12px;flex-wrap:wrap}
 a.btn{display:inline-block;background:#0ea5e9;color:#fff;text-decoration:none;padding:10px 12px;border-radius:8px}
 .muted{color:#64748b}
-.qr{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.qr{display:flex;gap:14px;flex-wrap:wrap;align-items:center}
 .badge{font-size:12px;background:#e2e8f0;color:#334155;border-radius:999px;padding:4px 8px}
+textarea.session{width:100%;min-height:140px}
+.copy{background:#16a34a}
 </style>
 <h1>Получение TELEGRAM_STRING_SESSION</h1>
 ${body}
 <hr><small class="muted">Никому не показывай свою строку сессии.</small>`;
 
-let ctx = {
-  client: null,
-  phone: null,
-  hash: null,
-  qr: null // { token, expiresAt }
-};
+let ctx = { client: null, phone: null, hash: null, qr: null };
 
-// Главная: QR + номер
 app.get('/', (_req, res) => {
   res.send(page(`
-<div class="box">
-  <b>Вариант 1 — QR (рекомендую)</b><br>С телефона: Telegram → Настройки → Устройства → <b>Подключить устройство</b> и сканируй.
-</div>
+<div class="box"><b>Вариант 1 — QR</b> (рекомендую): Telegram на телефоне → Настройки → Устройства → <b>Подключить устройство</b>, сканируй QR.</div>
 <div class="row">
   <a class="btn" href="/qr">Войти по QR</a>
+  <a class="btn" href="/last">Показать последнюю сессию</a>
 </div>
-
-<div class="box" style="margin-top:14px">
-  <b>Вариант 2 — по номеру</b> (если хочешь через код/SMS/звонок).
-</div>
+<div class="box" style="margin-top:14px"><b>Вариант 2 — по номеру</b> (код/SMS/звонок).</div>
 <form method="post" action="/send">
   <label>Номер телефона</label>
   <input name="phone" placeholder="+380XXXXXXXXX" required>
@@ -60,7 +55,7 @@ app.get('/', (_req, res) => {
 `));
 });
 
-/* ===== QR: генерация токена и страница с автообновлением ===== */
+/* ===== QR: автообновление токена и автопроверка ===== */
 async function ensureClient() {
   if (ctx.client) return ctx.client;
   const client = new TelegramClient(new StringSession(''), apiId, apiHash, {
@@ -70,21 +65,14 @@ async function ensureClient() {
   ctx.client = client;
   return client;
 }
-
 async function exportQrToken() {
   const client = await ensureClient();
-  const tokenResp = await client.invoke(new Api.auth.ExportLoginToken({
-    apiId, apiHash, exceptIds: []
-  }));
-  if (!('token' in tokenResp)) {
-    throw new Error('Не удалось получить QR-токен');
-  }
-  const token = tokenResp.token;
-  // Срок жизни у токена очень короткий; зададим "примерно" 25с.
+  const tok = await client.invoke(new Api.auth.ExportLoginToken({ apiId, apiHash, exceptIds: [] }));
+  if (!('token' in tok)) throw new Error('Не удалось получить QR-токен');
+  const token = tok.token;
   ctx.qr = { token, expiresAt: Date.now() + 25_000 };
   return token;
 }
-
 function qrHtml(tgLink) {
   const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${encodeURIComponent(tgLink)}`;
   return `
@@ -93,30 +81,27 @@ function qrHtml(tgLink) {
     <img alt="QR" src="${qrUrl}" width="240" height="240">
     <div>
       <div><span class="badge">QR действует ~25 сек</span></div>
-      <div class="muted" style="margin-top:8px">Если не открывается автоматически, можно нажать ссылку ниже:</div>
+      <div class="muted" style="margin-top:8px">Если не открывается автоматически, нажми ссылку:</div>
       <div style="margin-top:6px"><a class="btn" href="${tgLink}">Открыть tg://login</a></div>
-      <div class="muted" style="margin-top:8px">После сканирования подтвердите вход на телефоне.</div>
+      <div class="muted" style="margin-top:8px">После сканирования подтверди вход в Telegram.</div>
     </div>
   </div>
 </div>
-<form method="post" action="/qr/check" id="fcheck" style="display:none"></form>
 <script>
-  // Автоматически проверяем авторизацию каждые 5 сек
+  // Автопроверка каждые 5 сек: если получим сессию — страница заменится на результат
   let poll = setInterval(async () => {
     try {
       const r = await fetch('/qr/check', {method:'POST'});
       const t = await r.text();
-      if (t.includes('TELEGRAM_STRING_SESSION')) {
+      if (t.includes('textarea') && t.includes('TELEGRAM_STRING_SESSION')) {
         clearInterval(poll);
         document.open(); document.write(t); document.close();
       }
     } catch (e) {}
   }, 5000);
-
-  // Автоматически обновляем QR каждые ~25 сек
+  // Автообновление QR каждые ~25 сек
   setTimeout(()=>{ location.reload(); }, 25000);
-</script>
-`;
+</script>`;
 }
 
 app.get('/qr', async (_req, res) => {
@@ -132,53 +117,51 @@ app.get('/qr', async (_req, res) => {
 app.post('/qr/check', async (_req, res) => {
   try {
     const client = await ensureClient();
-
-    // если токен отсутствует или протух — выпустим новый
     if (!ctx.qr?.token || (ctx.qr.expiresAt && Date.now() > ctx.qr.expiresAt)) {
       await exportQrToken();
-      // просто покажем свежую страницу /qr (автообновление)
       const tgLink = `tg://login?token=${Buffer.from(ctx.qr.token).toString('base64url')}`;
       return res.send(page(qrHtml(tgLink)));
     }
-
-    // пробуем импорт токена (если отсканирован и подтвержден — вернётся Success)
     const resp = await client.invoke(new Api.auth.ImportLoginToken({ token: ctx.qr.token }));
-
     if (resp instanceof Api.auth.LoginTokenSuccess) {
       const session = new StringSession(client.session.save()).save();
-      // очистим контекст
+      lastSession = session;
+      console.log('SESSION:', session); // ← видно в логах Render
       ctx = { client: null, phone: null, hash: null, qr: null };
       return res.send(page(`
-<div class="box"><b>Готово!</b> Скопируй свою TELEGRAM_STRING_SESSION:</div>
-<pre>${session}</pre>
-<div class="box">Вставь её в Render → Environment → <b>TELEGRAM_STRING_SESSION</b>.</div>
+<div class="box"><b>Готово!</b> Скопируй TELEGRAM_STRING_SESSION:</div>
+<textarea class="session" readonly>${session}</textarea>
+<div style="margin-top:8px;display:flex;gap:8px">
+  <button class="copy" onclick="navigator.clipboard.writeText(document.querySelector('textarea.session').value)">Скопировать</button>
+  <a class="btn" href="/last" target="_blank">Открыть /last</a>
+</div>
 `));
     } else if (resp instanceof Api.auth.LoginTokenMigrateTo) {
-      // Миграция в другой DC
       const { dcId, token } = resp;
       await client._switchDC(dcId);
       const resp2 = await client.invoke(new Api.auth.ImportLoginToken({ token }));
       if (resp2 instanceof Api.auth.LoginTokenSuccess) {
         const session = new StringSession(client.session.save()).save();
+        lastSession = session;
+        console.log('SESSION:', session);
         ctx = { client: null, phone: null, hash: null, qr: null };
         return res.send(page(`
-<div class="box"><b>Готово!</b> Скопируй свою TELEGRAM_STRING_SESSION:</div>
-<pre>${session}</pre>
-<div class="box">Вставь её в Render → Environment → <b>TELEGRAM_STRING_SESSION</b>.</div>
+<div class="box"><b>Готово!</b> Скопируй TELEGRAM_STRING_SESSION:</div>
+<textarea class="session" readonly>${session}</textarea>
+<div style="margin-top:8px;display:flex;gap:8px">
+  <button class="copy" onclick="navigator.clipboard.writeText(document.querySelector('textarea.session').value)">Скопировать</button>
+  <a class="btn" href="/last" target="_blank">Открыть /last</a>
+</div>
 `));
       }
-      // если ещё нет — вернём страницу и продолжим поллинг
       const tgLink = `tg://login?token=${Buffer.from(ctx.qr.token).toString('base64url')}`;
       return res.send(page(qrHtml(tgLink)));
     } else {
-      // Ещё не подтверждено — вернём ту же страницу
       const tgLink = `tg://login?token=${Buffer.from(ctx.qr.token).toString('base64url')}`;
       return res.send(page(qrHtml(tgLink)));
     }
   } catch (e) {
-    // Если токен истёк — просто обновим QR
-    const msg = String(e?.message || e);
-    if (msg.includes('AUTH_TOKEN_EXPIRED') || msg.includes('SESSION_PASSWORD_NEEDED')) {
+    if (String(e?.message||e).includes('AUTH_TOKEN_EXPIRED')) {
       try {
         await exportQrToken();
         const tgLink = `tg://login?token=${Buffer.from(ctx.qr.token).toString('base64url')}`;
@@ -191,39 +174,24 @@ app.post('/qr/check', async (_req, res) => {
   }
 });
 
-/* ===== Вариант по номеру (как было, с таймером) ===== */
+/* ===== Вариант по номеру (оставлен) ===== */
 app.post('/send', async (req, res) => {
   try {
     const phone = String(req.body.phone || '').trim();
     if (!phone.startsWith('+')) throw new Error('Укажи номер вида +380…');
-
-    const client = new TelegramClient(new StringSession(''), apiId, apiHash, {
-      connectionRetries: 6, retryDelay: 1200
-    });
+    const client = new TelegramClient(new StringSession(''), apiId, apiHash, { connectionRetries: 6, retryDelay: 1200 });
     await client.connect();
-
     const send = await client.invoke(new Api.auth.SendCode({
       phoneNumber: phone, apiId, apiHash,
-      settings: new Api.CodeSettings({
-        allowFlashcall: false,
-        currentNumber: true,
-        allowAppHash: true,
-        allowMissedCall: true
-      })
+      settings: new Api.CodeSettings({ allowFlashcall:false, currentNumber:true, allowAppHash:true, allowMissedCall:true })
     }));
-
     ctx = { client, phone, hash: send.phoneCodeHash, qr: null };
-
     const timeout = send?.timeout ?? null;
     const nextType = send?.nextType?._ || null;
-    const tip = nextType
-      ? `Следующий тип доставки: <b>${nextType.replace('auth.sentCodeType','')}</b>.`
-      : `Сервер не сообщил тип следующей доставки.`;
-
+    const tip = nextType ? `Следующий тип доставки: <b>${nextType.replace('auth.sentCodeType','')}</b>.` : `Сервер не сообщил тип следующей доставки.`;
     const waitBlock = timeout
       ? `<div class="box">Повтор (SMS/звонок) разрешат через ~${timeout} сек. Раньше будет 406: SEND_CODE_UNAVAILABLE.</div>`
       : `<div class="box">Если код не пришёл ~1 минуту — попробуй «Запросить SMS/Звонок».</div>`;
-
     res.send(page(`
 ${waitBlock}
 <div class="muted">${tip}</div>
@@ -245,9 +213,7 @@ ${waitBlock}
 app.post('/resend', async (_req, res) => {
   try {
     if (!ctx.client || !ctx.hash || !ctx.phone) throw new Error('Сначала отправь номер на /');
-    await ctx.client.invoke(new Api.auth.ResendCode({
-      phoneNumber: ctx.phone, phoneCodeHash: ctx.hash
-    }));
+    await ctx.client.invoke(new Api.auth.ResendCode({ phoneNumber: ctx.phone, phoneCodeHash: ctx.hash }));
     res.redirect(303, '/');
   } catch (e) {
     res.status(500).send(page(`<div class="box err">Ошибка /resend: ${String(e?.message || e)}</div><a href="/">Назад</a>`));
@@ -258,23 +224,34 @@ app.post('/signin', async (req, res) => {
   try {
     const code = String(req.body.code || '').trim();
     if (!ctx.client || !ctx.hash || !ctx.phone) throw new Error('Сначала отправь номер на /');
-
-    await ctx.client.invoke(new Api.auth.SignIn({
-      phoneNumber: ctx.phone, phoneCodeHash: ctx.hash, phoneCode: code
-    }));
-
+    await ctx.client.invoke(new Api.auth.SignIn({ phoneNumber: ctx.phone, phoneCodeHash: ctx.hash, phoneCode: code }));
     const session = new StringSession(ctx.client.session.save()).save();
+    lastSession = session;
+    console.log('SESSION:', session);
     ctx = { client: null, phone: null, hash: null, qr: null };
-
     res.send(page(`
-<div class="box"><b>Готово!</b> Скопируй свою TELEGRAM_STRING_SESSION:</div>
-<pre>${session}</pre>
-<div class="box">Вставь её в Render → Environment → <b>TELEGRAM_STRING_SESSION</b>.</div>
+<div class="box"><b>Готово!</b> Скопируй TELEGRAM_STRING_SESSION:</div>
+<textarea class="session" readonly>${session}</textarea>
+<div style="margin-top:8px">
+  <button class="copy" onclick="navigator.clipboard.writeText(document.querySelector('textarea.session').value)">Скопировать</button>
+  <a class="btn" href="/last" target="_blank">Открыть /last</a>
+</div>
 `));
   } catch (e) {
-    res.status(500).send(page(`<div class="box err">Ошибка /signin: ${String(e?.message || e)}</div>
-<a href="/">Назад</a>`));
+    res.status(500).send(page(`<div class="box err">Ошибка /signin: ${String(e?.message || e)}</div><a href="/">Назад</a>`));
   }
+});
+
+/* ===== Показать последнюю сохранённую сессию ===== */
+app.get('/last', (_req, res) => {
+  if (!lastSession) {
+    return res.send(page(`<div class="box">Пока нет сохранённой сессии. Сначала авторизуйся через QR или код.</div><a class="btn" href="/">На главную</a>`));
+  }
+  res.send(page(`
+<div class="box"><b>Последняя TELEGRAM_STRING_SESSION:</b></div>
+<textarea class="session" readonly>${lastSession}</textarea>
+<div style="margin-top:8px"><button class="copy" onclick="navigator.clipboard.writeText(document.querySelector('textarea.session').value)">Скопировать</button></div>
+`));
 });
 
 const PORT = process.env.PORT || 3000;
